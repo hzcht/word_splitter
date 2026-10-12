@@ -1,0 +1,14 @@
+# Legacy reference pipeline (separate nested Go module, Linux/aspell only)
+old/
+
+# Agent working notes (not part of the published project)
+AGENTS.md
+
+# Machine-local dictionary caches (auto-regenerated; the fingerprint stores
+# file mtimes, so a committed cache would never match on another machine)
+dicts/*.cache
+
+# Build/test artifacts
+*.exe
+*.test
+*.pprof
