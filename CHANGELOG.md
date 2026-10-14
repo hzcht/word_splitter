@@ -38,6 +38,12 @@ is not tracked here.
   are best-effort, so a read-only directory just never caches.
   `TestShippedDictsCacheRoundtrip` deep-compares warm vs cold on the real
   dictionaries and `TestGoldenListFull` passes both cold and warm.
+- `tools/fetchdicts`: a standard-library tool that downloads public
+  word-frequency lists (`-url`/`-in`, `.gz` supported), transliterates
+  Cyrillic and Greek to ASCII (`-romanize`), calibrates counts
+  (`-scale_total`) and writes `word<TAB>count` unigrams plus, from a sentence
+  corpus, `w1<TAB>w2<TAB>count` bigrams directly into the dictionary
+  directory.
 
 ### Fixed
 
@@ -54,6 +60,15 @@ is not tracked here.
 - Benchmarks (`BenchmarkProcessLine`, `BenchmarkSegmentOnly`) now sample
   `old/list.full` instead of `old/list.40k`, following the project decision
   to treat `list.full` as the canonical input list.
+
+### Documentation
+
+- `README.md` gains a shipped-models table, a supported-scripts table and an
+  "Adding another language" walkthrough (fetch, romanize, `-scale_total`).
+- `SOURCES.md` catalogues downloadable word-frequency lists and corpora
+  (FrequencyWords, wordfreq, Leipzig, SUBTLEX, Google Books Ngram, OPUS,
+  Tatoeba, Wikipedia, OSCAR, …), transliteration tools and the licenses that
+  apply to derived `dicts/` files.
 
 ## [0.2.0] - 2026-10-12
 

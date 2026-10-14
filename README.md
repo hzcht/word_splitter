@@ -108,6 +108,29 @@ Rules applied at load time:
 - `LoadBigrams` returns `nil` when the directory has no `*.bigrams` file;
   scoring then falls back to unigrams only.
 
+### Shipped models
+
+| File | Contents |
+| --- | --- |
+| `dicts/en.txt` | 559 936 Latin-script words (English plus other Latin-script languages), folded to ASCII |
+| `dicts/en.bigrams` | 1 105 638 word pairs |
+
+The vocabulary deliberately mixes languages, so a spell may combine words from
+different files.
+
+### Supported scripts
+
+| Script | How it is handled |
+| --- | --- |
+| Latin, with diacritics | folded to ASCII automatically (`Zürich` → `zurich`, `naïve` → `naive`) |
+| Cyrillic, Greek | load after romanization, e.g. `tools/fetchdicts -romanize cyrillic` |
+| Arabic, Hebrew, CJK, … | not built in; transliterate to `[a-z0-9]` before adding |
+
+A source may contain non-Latin runes, but the loader drops them: only
+`[a-z0-9]` words take part in splitting (`text.IsSplittable`). Dictionaries for
+non-Latin languages must therefore be romanized first — the loader never
+segments other scripts, and input spells are folded the same way.
+
 ### Warm cache
 
 The loaders keep a binary cache next to the sources — `.words.cache` and
@@ -147,6 +170,51 @@ merging sums counts, so a rerun would double every pair. Never pass
 tokens like `1<TAB>70533` keep their real counts (an older "first integer is
 the count" rule summed 6509 numeric-token corpus lines into wrapped-int64
 garbage).
+
+### Adding another language
+
+`tools/fetchdicts` downloads public word-frequency lists, transliterates
+non-Latin scripts to ASCII and calibrates counts, then writes a ready
+`dicts/<lang>.txt` (and, from a corpus, `dicts/<lang>.bigrams`):
+
+```sh
+go run ./tools/fetchdicts -lang ru -romanize cyrillic \
+    -url https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/ru/ru_50k.txt \
+    -min_count 2 -scale_total 12000000 -out dicts/ru.txt
+```
+
+`-scale_total` rescales the new file's counts so its mass matches a target.
+Because every `*.txt` count is summed into one total, an unscaled source with
+large raw counts would swamp the existing English model; a good starting point
+is to give each language a mass comparable to (or a fraction of) the English
+file's total. The loader prints `N words` on start — watch it move.
+
+For a Latin-script language, drop `-romanize`; diacritics are folded for you:
+
+```sh
+go run ./tools/fetchdicts -lang de \
+    -url https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/de/de_50k.txt \
+    -scale_total 12000000 -out dicts/de.txt
+```
+
+For bigrams, pass a sentence corpus (one sentence per line):
+
+```sh
+go run ./tools/fetchdicts -lang ru -romanize cyrillic \
+    -corpus ru.sentences.txt -min_bigram_count 3
+```
+
+Where to get the data (FrequencyWords, wordfreq, Leipzig, SUBTLEX, Google
+Books Ngram, OPUS, Tatoeba, Wikipedia, OSCAR, …), which transliteration tools
+exist, and which licenses apply is catalogued in
+[SOURCES.md](SOURCES.md).
+
+### Sources and attribution
+
+The shipped models are derived from external frequency data. See
+[SOURCES.md](SOURCES.md) for the dataset list and the CC-BY-SA / attribution
+obligations that apply when a derived `dicts/` is redistributed; keep a NOTICE
+file next to `dicts/` when you add a source.
 
 ## How it works
 
@@ -273,6 +341,8 @@ internal/text    folding and word-rune classification
 internal/dict    unigram/bigram loaders and parsers
 internal/segment token search, separator forms, candidate combination
 dicts/           shipped word and bigram models
+tools/fetchdicts download/transliterate external lists into dicts/
+SOURCES.md       external dataset catalogue and licenses
 bench_test.go    end-to-end benchmarks
 ```
 
