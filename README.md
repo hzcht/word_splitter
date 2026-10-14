@@ -291,5 +291,6 @@ bench_test.go    end-to-end benchmarks
   goroutines append concurrently — rerunning against an existing output
   duplicates and interleaves rows, so use a fresh filename or delete first.
 
-See `AGENTS.md` for the full list of generated artifacts and of scripts in
-`old/` that have destructive side effects and must not be run casually.
+Some scripts and generated artifacts in `old/` have destructive side effects —
+live database inserts, `dig` queries, append-only outputs — and must not be run
+casually; `process.sh`, `digg.sh` and the Ruby helpers are reference-only.

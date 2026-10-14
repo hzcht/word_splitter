@@ -105,8 +105,6 @@ repeated runs:
 ### Documentation
 
 - `README.md` performance table updated for the new numbers.
-- `AGENTS.md` design notes document the flat bigram layout, `atoiField` and
-  the hand-rolled heaps.
 
 ## [0.1.0] - 2026-10-12
 
@@ -139,7 +137,7 @@ pipeline. Standard library only; builds and tests on Windows and Unix.
   `old/un1` + `old/w`) and `en.bigrams` (249 794 pairs, built from
   `old/bk/bigrams.go` with `-min_count 3`).
 - Tests next to each package (`*_test.go`) including `BenchmarkProcessLine`
-  and `BenchmarkSegmentOnly`, plus `README.md` and `AGENTS.md`.
+  and `BenchmarkSegmentOnly`, plus `README.md`.
 
 ### Fixed
 
