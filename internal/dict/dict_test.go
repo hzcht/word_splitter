@@ -1,6 +1,7 @@
 package dict
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -121,6 +122,30 @@ func TestCondNilReceiver(t *testing.T) {
 	var b *Bigrams
 	if got := b.Cond("a", "b", func(string) float64 { return 0.25 }); got == 0 {
 		t.Error("nil bigram should fall back to the unigram probability")
+	}
+}
+
+func TestCondUnseenFallsBackToUnigram(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "b.bigrams"), "new\tyork\t150\n")
+	b, err := LoadBigrams(dir, 1, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == nil {
+		t.Fatal("expected bigrams")
+	}
+	const p = 0.25
+	uni := func(string) float64 { return p }
+	want := math.Log(p)
+	if got := b.Cond("new", "missing", uni); math.Abs(got-want) > 1e-12 {
+		t.Errorf("unseen Cond = %v, want unigram %v", got, want)
+	}
+	if got := b.Cond("missing", "word", uni); math.Abs(got-want) > 1e-12 {
+		t.Errorf("unknown-left Cond = %v, want unigram %v", got, want)
+	}
+	if got := b.CondLegacy("new", "missing", uni); got >= want {
+		t.Errorf("legacy Cond = %v, want the old unseen-pair penalty below %v", got, want)
 	}
 }
 

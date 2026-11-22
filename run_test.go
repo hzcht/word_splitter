@@ -23,6 +23,8 @@ ku 5000
 ra 6000
 or 300000
 glass 50000
+b 100
+is 500
 `
 
 const runTestBigrams = "new\tyork\t100000\n"
@@ -48,7 +50,7 @@ func newTestSegmenter(t *testing.T) *segment.Segmenter {
 }
 
 func defaultRunConfig() runConfig {
-	return runConfig{col: 1, maxForms: 8, maxVariants: 20}
+	return runConfig{col: 1, maxForms: 8, maxVariants: 20, window: 6, rank: "asis"}
 }
 
 func spells(rows []row) []string {
@@ -224,9 +226,10 @@ func TestGoldenListFull(t *testing.T) {
 	if _, err := runPipeline(f, h, seg, defaultRunConfig(), runtime.NumCPU()); err != nil {
 		t.Fatal(err)
 	}
-	// Re-baselined when dicts/ was extended with old/corpus.txt (unigrams)
-	// and old/1.txt + old/w3.txt (bigrams).
-	const want = "952e99fe2f68a9246618adcfca1253ef51fc8ad03bd18382d3d564f58e9fe5b8"
+	// Re-baselined for the quality pass: unseen bigrams fall back to the
+	// unigram probability, splits pay -word_penalty and -short_word_penalty,
+	// and candidates use deterministic readability tie-breakers.
+	const want = "4725dd24e245f72804f66f1232cfbed61fbe3f7e89287423ea770f1a83370074"
 	if got := hex.EncodeToString(h.Sum(nil)); got != want {
 		t.Errorf("golden output hash mismatch:\n got  %s\n want %s", got, want)
 	}

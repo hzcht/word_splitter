@@ -53,12 +53,21 @@ spell_splitter run -in spells.txt -out spells.tsv
 | `-out` | stdout | output file |
 | `-dicts` | `dicts` | dictionary directory |
 | `-col` | `1` | 1-based input column holding the spell |
-| `-max_variants` | `20` | max output rows per input line, including the `asis` row |
+| `-max_variants` | `8` | max output rows per input line, including the `asis` row |
 | `-max_forms` | `8` | max separator forms per input line |
 | `-max_token` | `8` | max candidate splits per token |
 | `-max_nodes` | `20000` | max search steps per token |
 | `-max_unknown` | `12` | max runes of an unknown run inside a token |
 | `-max_token_len` | `64` | tokens longer than this are never split |
+| `-max_words` | `6` | max words in one candidate |
+| `-word_penalty` | `1.5` | score penalty per extra word boundary |
+| `-short_word_penalty` | `2.0` | score penalty per missing letter of a non-numeric word shorter than 3 |
+| `-min_gain` | `0` | drop candidates scoring less than the best unsplit form plus this |
+| `-window` | `6.0` | drop candidates more than this below the best candidate |
+| `-bigram_backoff` | `unigram` | unseen bigrams: `unigram` (number) or `legacy` (interpolate with K=5) |
+| `-score` | `false` | append quality and confidence columns |
+| `-rank` | `asis` | row order: `asis` (input order) or `quality` (best first) |
+| `-no_asis` | `false` | omit the `asis` row |
 | `-min_word` | `1` | shortest dictionary word considered (raise it to drop single-letter noise) |
 | `-max_len` | `40` | longest dictionary word considered |
 | `-min_count` | `1` | drop dictionary words rarer than this |
@@ -72,6 +81,16 @@ Tab-separated, one row per candidate spelling:
 input<TAB>spell<TAB>source
 ```
 
+With `-score`, two more columns are appended:
+
+```text
+input<TAB>spell<TAB>source<TAB>quality<TAB>confidence
+```
+
+`quality` is the candidate score (3 decimals); `confidence` is a softmax over
+the qualities of the rows for that input line (4 decimals). It is relative to
+the alternatives on that line, not a calibrated probability.
+
 | `source` | Meaning |
 | --- | --- |
 | `asis` | the input as it came in (always the first row) |
@@ -79,10 +98,14 @@ input<TAB>spell<TAB>source
 | `split` | tokens were split and every resulting word is in the dictionary |
 | `partial` | tokens were split and at least one resulting word is unknown |
 
-Every input line contributes exactly one `asis` row, so an output with fewer
-`asis` rows than input lines means some lines were skipped (reported on
-stderr as `N lines skipped` — a line is skipped when `-col` does not exist
-or the column is blank).
+Every input line contributes exactly one `asis` row unless `-no_asis` is set,
+so an output with fewer `asis` rows than input lines means some lines were
+skipped (reported on stderr as `N lines skipped` — a line is skipped when
+`-col` does not exist or the column is blank).
+
+Rows stay in input order. `-rank quality` sorts the rows of each line by
+descending `quality` (then fewer words, longer shortest word, lexicographic),
+and `-window` / `-min_gain` filter weak alternatives before the cap is applied.
 
 ## Dictionaries
 
@@ -237,33 +260,47 @@ For each input line:
      runes, are not split at all;
    - `enumDict` enumerates the best dictionary-only segmentations, pruning
      branches that cannot reach the current k-th best score and spending at
-     most `-max_nodes` steps;
-   - when that yields fewer than `-max_token` candidates, `partialPaths`
+     most `-max_nodes` steps. Its unigram bound is no longer admissible once
+bigram scores replace unigram scores, so it over-generates four times the
+candidate count before the final re-score;
+   - when that yields fewer candidates, `partialPaths`
      adds segmentations carrying exactly one unknown run of at most
      `-max_unknown` runes, with dictionary words on both sides (this is what
-     produces `partial` rows such as `0 apr credit card`).
-4. **Combination and re-scoring.** Per-token candidates are combined best-first
-   by their additive scores (a pool of the best combinations is kept), then
-   every combination is re-scored as a whole line so that bigrams spanning
-   token boundaries count. Results are sorted by score, de-duplicated and
-   capped by `-max_variants`.
+     produces `partial` rows such as `0 apr credit card`);
+    - candidates longer than `-max_words` are discarded and the rest are
+      ranked by score, then fewer words, longer shortest word, lexicographic.
+4. **Combination and filtering.** Per-token candidates are combined best-first
+   by their additive scores, then every combination is re-scored as a whole
+   line so that bigrams spanning token boundaries count. The combination's
+   `split` flag is recomputed from the candidates actually chosen — inheriting
+   it from the heap parent mislabelled whole glued tokens as `split`. Candidates
+   below `best unsplit form + -min_gain` or more than `-window` below the best
+   candidate are dropped; survivors are de-duplicated, capped by
+   `-max_variants` and ordered by `-rank`.
 
 ### Scoring
 
 ```text
 score(w0..wn) = log P(w0) + Σ log P(wi | wi-1)
+              - WordPenalty * (n - 1)
+              - Σ shortPenalty(wi)
 ```
 
 - `P(w) = (c(w) + 1) / (N + 1)` with `c(w)` the corpus count and `N` the sum
   of all counts.
-- `P(wi | wi-1) = (c(wi-1, wi) + K·P(wi)) / (c(wi-1) + K)` with `K = 5`
-  (interpolated bigram); a missing pair therefore degrades to the unigram
-  probability of `wi` rather than to zero.
+- For a pair present in the model, `P(wi | wi-1) = (c(wi-1, wi) + K·P(wi)) /
+  (c(wi-1) + K)` with `K = 5`. A pair absent from the model falls back to
+  `P(wi)` — the `-bigram_backoff unigram` default; `-bigram_backoff legacy`
+  interpolates unseen pairs too, which penalises frequent left words heavily.
 - A word missing from the dictionary scores `UnknownPerRune` per rune with
   `UnknownPerRune = ln(0.01)`, and is never charged a unigram on top of that.
+- `WordPenalty` (`-word_penalty`, default 1.5) is charged per word boundary,
+  so a split has to earn its extra words.
+- `shortPenalty(w) = (3 - len(w)) * -short_word_penalty` for non-numeric words
+  shorter than 3 (default 2.0); digit tokens are exempt.
 
 This keeps whole-token, all-dictionary and mixed candidates comparable on one
-scale, which is what makes `your bis` rank above `you rbis`.
+scale.
 
 ### Guardrails
 
@@ -273,7 +310,9 @@ scale, which is what makes `your bis` rank above `you rbis`.
 | candidates per token | `-max_token` | bounds the per-token candidate list |
 | search steps per token | `-max_nodes` | hard budget for `enumDict` |
 | unknown run length | `-max_unknown` | bounds the single unknown run in partial paths |
+| words per candidate | `-max_words` | bounds candidate word count |
 | forms per line | `-max_forms` | bounds the separator cross-product |
+| score gap | `-window`, `-min_gain` | drops weak alternatives before the cap |
 | rows per line | `-max_variants` | bounds the output |
 
 `run` streams input through a worker pool but writes output in input order, so
@@ -283,7 +322,8 @@ the TSV is deterministic for a given input, dictionary and flag set.
 
 Measured on an Intel Xeon E5-2630 @ 2.30 GHz (Windows, go 1.27) with the
 shipped `dicts/` (559 936 words, 1 105 638 bigrams) and `old/list.40k`
-(40 000 spells):
+(40 000 spells). Figures predate the quality pass in [Unreleased]; re-run the
+benchmarks for current numbers:
 
 | Step | Time |
 | --- | --- |
@@ -313,8 +353,8 @@ missing.
   dictionary loaders (including the merge-before-filter rule), segmentation,
   separator forms, combination, the `run` pipeline (ordered output, skip
   counting, write-error propagation) and a golden-hash regression gate over
-  the canonical input list `old/list.full` (80 047 lines → 764 501 rows,
-  SHA-256 `952e99fe…`). They pass on Windows.
+  the canonical input list `old/list.full` (80 047 lines → 186 627 rows,
+  SHA-256 `4725dd24…`). They pass on Windows.
 - `internal/segment/forms.go` and `internal/segment/segment.go` are the
   packages to touch for output-quality changes; `dicts/` and `internal/dict/`
   for vocabulary/scoring changes.
@@ -326,16 +366,22 @@ missing.
 
   ```sh
   go test -run TestGoldenListFull .
-  # or compare full dumps by hand:
-  go run . run -in old/list.full -out out_new.tsv
+  # or compare full dumps by hand — the gate uses -max_variants 20,
+   # not the CLI default of 8:
+  go run . run -in old/list.full -max_variants 20 -out out_new.tsv
   # compare against the previous out.tsv
   ```
+
+  The gate pins `defaultRunConfig()` in `run_test.go`, not the CLI defaults;
+  keep the two in sync when a run default changes.
 
 ## Layout
 
 ```text
 main.go          CLI dispatch, usage, flag handling
-run.go           run command: worker pool, per-line pipeline, source labels
+run.go           run command: flags, validation, dictionary loading
+pipeline.go      worker pool, ordered writing, skip counting, TSV rendering
+line.go          per-line pipeline: baseline, filtering, ranking, confidence
 dictcmd.go       makedict / makebigrams, atomic dictionary writes
 internal/text    folding and word-rune classification
 internal/dict    unigram/bigram loaders and parsers

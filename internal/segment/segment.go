@@ -13,8 +13,9 @@ import (
 	"spell_splitter/internal/text"
 )
 
-// Options tunes the segmentation search. Zero values are replaced by the
-// defaults when a Segmenter is built, so a zero Options is safe.
+// Options tunes the segmentation search. Length and budget fields use the
+// defaults when zero; scoring fields are used as given, so a zero penalty
+// disables that term. Use DefaultOptions for the recommended model.
 type Options struct {
 	// MinWordLen is the shortest dictionary word considered.
 	MinWordLen int
@@ -29,21 +30,39 @@ type Options struct {
 	MaxNodes int
 	// MaxUnknownLen caps the length of an unknown run inside a token.
 	MaxUnknownLen int
+	// MaxWords caps the number of words in one candidate.
+	MaxWords int
 	// UnknownPerRune is the log probability of a single rune of a word
 	// missing from the dictionary.
 	UnknownPerRune float64
+	// WordPenalty is subtracted once per word boundary of a multi-word
+	// candidate. It is the prior against gratuitous splitting.
+	WordPenalty float64
+	// ShortWordPenalty is multiplied by the missing letters of every
+	// non-numeric word shorter than ShortWordLen.
+	ShortWordPenalty float64
+	// ShortWordLen is the length below which ShortWordPenalty applies.
+	ShortWordLen int
+	// BigramBackoff selects the unseen-pair rule: "unigram" (default) or
+	// "legacy".
+	BigramBackoff string
 }
 
 // DefaultOptions returns the options used by the run command.
 func DefaultOptions() Options {
 	return Options{
-		MinWordLen:     1,
-		MaxWordLen:     0,
-		MaxTokenLen:    64,
-		MaxCandidates:  8,
-		MaxNodes:       20000,
-		MaxUnknownLen:  12,
-		UnknownPerRune: math.Log(0.01),
+		MinWordLen:       1,
+		MaxWordLen:       0,
+		MaxTokenLen:      64,
+		MaxCandidates:    8,
+		MaxNodes:         20000,
+		MaxUnknownLen:    12,
+		MaxWords:         6,
+		UnknownPerRune:   math.Log(0.01),
+		WordPenalty:      1.5,
+		ShortWordPenalty: 2.0,
+		ShortWordLen:     3,
+		BigramBackoff:    "unigram",
 	}
 }
 
@@ -64,8 +83,17 @@ func (o Options) withDefaults() Options {
 	if o.MaxUnknownLen < 1 {
 		o.MaxUnknownLen = def.MaxUnknownLen
 	}
+	if o.MaxWords < 1 {
+		o.MaxWords = def.MaxWords
+	}
+	if o.ShortWordLen < 1 {
+		o.ShortWordLen = def.ShortWordLen
+	}
 	if o.UnknownPerRune == 0 {
 		o.UnknownPerRune = def.UnknownPerRune
+	}
+	if o.BigramBackoff == "" {
+		o.BigramBackoff = def.BigramBackoff
 	}
 	return o
 }
@@ -81,6 +109,45 @@ type Candidate struct {
 
 // String renders the candidate as a spell.
 func (c Candidate) String() string { return strings.Join(c.Words, " ") }
+
+// Compare orders candidates from best to worst: higher score first, then
+// fewer words, then a longer shortest word, then lexicographic order. The
+// tie-breakers make the output deterministic and prefer the more readable
+// spelling when the probabilistic model cannot separate two candidates.
+func Compare(a, b Candidate) int {
+	if a.Score > b.Score {
+		return -1
+	}
+	if a.Score < b.Score {
+		return 1
+	}
+	if len(a.Words) != len(b.Words) {
+		return len(a.Words) - len(b.Words)
+	}
+	as, bs := shortestWord(a.Words), shortestWord(b.Words)
+	if as != bs {
+		return bs - as
+	}
+	for i := 0; i < len(a.Words) && i < len(b.Words); i++ {
+		if a.Words[i] < b.Words[i] {
+			return -1
+		}
+		if a.Words[i] > b.Words[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+func shortestWord(words []string) int {
+	best := 0
+	for _, w := range words {
+		if best == 0 || len(w) < best {
+			best = len(w)
+		}
+	}
+	return best
+}
 
 // Segmenter splits tokens into words.
 type Segmenter struct {
@@ -124,22 +191,53 @@ func (s *Segmenter) uniProb(word string) float64 {
 	return math.Exp(s.wordLogProb(word))
 }
 
-// score is the Markov score of a whole sequence of words:
+// score is the quality score of a whole sequence of words:
 //
 //	log P(w0) + sum_i log P(wi | w(i-1))
+//	- WordPenalty * (len(words)-1)
+//	- short-word penalties
 //
 // Missing bigrams fall back to the unigram probability of wi, and missing
 // words to UnknownPerRune per rune, so every candidate is compared on the
-// same scale.
+// same scale. The penalties make a split pay for every extra boundary and
+// for tiny fragments such as "b" or "y".
 func (s *Segmenter) score(words []string) float64 {
 	if len(words) == 0 {
 		return 0
 	}
 	total := s.wordLogProb(words[0])
 	for i := 1; i < len(words); i++ {
-		total += s.Bi.Cond(words[i-1], words[i], s.uniProb)
+		if s.Opt.BigramBackoff == "legacy" {
+			total += s.Bi.CondLegacy(words[i-1], words[i], s.uniProb)
+		} else {
+			total += s.Bi.Cond(words[i-1], words[i], s.uniProb)
+		}
+	}
+	if len(words) > 1 {
+		total -= s.Opt.WordPenalty * float64(len(words)-1)
+		for _, w := range words {
+			total -= s.shortPenalty(w)
+		}
 	}
 	return total
+}
+
+// WholeScore scores tok as one unsplit word. It is the baseline against
+// which split candidates are filtered.
+func (s *Segmenter) WholeScore(tok string) float64 {
+	low := text.Fold(tok)
+	if low == "" {
+		return 0
+	}
+	return s.score([]string{low})
+}
+
+// shortPenalty charges non-numeric words shorter than ShortWordLen.
+func (s *Segmenter) shortPenalty(w string) float64 {
+	if s.Opt.ShortWordPenalty == 0 || len(w) >= s.Opt.ShortWordLen || text.IsDigits(w) {
+		return 0
+	}
+	return float64(s.Opt.ShortWordLen-len(w)) * s.Opt.ShortWordPenalty
 }
 
 // Segment returns the best-first candidate spellings of tok.
@@ -157,14 +255,21 @@ func (s *Segmenter) Segment(tok string) []Candidate {
 
 	var arena wordArena
 	tab := s.buildEdges(low)
-	splits := s.enumDict(tab, &arena, 0, len(low), s.Opt.MaxCandidates, s.Opt.MaxNodes)
+	// Over-generate dictionary paths: the unigram bound used by enumDict is
+	// not admissible once bigram scores replace unigram scores, so a path
+	// pruned at k can win after finalize re-scores it.
+	enumK := s.Opt.MaxCandidates
+	if enumK <= 64 {
+		enumK *= 4
+	}
+	splits := s.enumDict(tab, &arena, 0, len(low), enumK, s.Opt.MaxNodes)
 	for _, p := range splits {
 		cands = append(cands, Candidate{Words: p.words, Split: len(p.words) > 1})
 	}
 	// Partial splits always rank below the dictionary ones, so only look
 	// for them when dictionary splits cannot fill the candidate list.
-	if len(splits) < s.Opt.MaxCandidates {
-		cands = append(cands, s.partialPaths(tab, &arena, low, s.Opt.MaxCandidates-len(splits))...)
+	if len(splits) < enumK {
+		cands = append(cands, s.partialPaths(tab, low, enumK-len(splits))...)
 	}
 	return s.finalize(cands)
 }
@@ -178,6 +283,9 @@ func (s *Segmenter) finalize(cands []Candidate) []Candidate {
 	seen := make(map[string]int, len(cands))
 	uniq := make([]Candidate, 0, len(cands))
 	for _, c := range cands {
+		if len(c.Words) > s.Opt.MaxWords {
+			continue
+		}
 		key := strings.Join(c.Words, " ")
 		if i, ok := seen[key]; ok {
 			if c.Score > uniq[i].Score {
@@ -189,7 +297,7 @@ func (s *Segmenter) finalize(cands []Candidate) []Candidate {
 		seen[key] = len(uniq)
 		uniq = append(uniq, c)
 	}
-	sort.SliceStable(uniq, func(i, j int) bool { return uniq[i].Score > uniq[j].Score })
+	sort.SliceStable(uniq, func(i, j int) bool { return Compare(uniq[i], uniq[j]) < 0 })
 	if len(uniq) > s.Opt.MaxCandidates {
 		uniq = uniq[:s.Opt.MaxCandidates]
 	}
@@ -207,9 +315,10 @@ func (s *Segmenter) enumDict(tab edgeTable, ar *wordArena, lo, hi, k, budget int
 	n := hi - lo
 
 	// best[i] bounds the score of any continuation from relative position i,
-	// taking both dictionary words and one unknown word into account. Because
-	// bigram terms and unknown words only ever lower a score, the plain
-	// unigram sum is admissible for pruning.
+	// taking both dictionary words and one unknown word into account. The
+	// unigram sum is only an optimistic heuristic once bigram scores replace
+	// unigram scores: a seen bigram can be higher than its unigram. Callers
+	// over-generate (see Segment) so a path pruned here can still be found.
 	best := make([]float64, n+1)
 	best[n] = 0
 	for i := n - 1; i >= 0; i-- {
@@ -335,57 +444,67 @@ func (s *Segmenter) buildEdges(t string) edgeTable {
 	return tab
 }
 
-// coverable marks the positions from which the prefix and the suffix of t can
-// be covered by whole dictionary words.
-func (s *Segmenter) coverable(tab edgeTable) (fwd, bwd []bool) {
-	n := len(tab.starts) - 1
-	fwd = make([]bool, n+1)
-	bwd = make([]bool, n+1)
-	fwd[0] = true
+// bestPrefixes computes up to k best dictionary-only covers of every prefix
+// of the token, by unigram score, in one forward pass. The old implementation
+// called enumDict once per prefix and spent O(n*MaxNodes) work; this is
+// O(edges*k log k).
+func (s *Segmenter) bestPrefixes(tab edgeTable, n, k int) [][]pathItem {
+	pre := make([][]pathItem, n+1)
+	pre[0] = []pathItem{{score: 0}}
 	for i := 0; i < n; i++ {
-		if !fwd[i] {
+		if len(pre[i]) == 0 {
 			continue
 		}
 		for ei := tab.starts[i]; ei < tab.starts[i+1]; ei++ {
-			fwd[tab.edges[ei].j] = true
-		}
-	}
-	bwd[n] = true
-	for i := n - 1; i >= 0; i-- {
-		for ei := tab.starts[i]; ei < tab.starts[i+1]; ei++ {
-			if bwd[tab.edges[ei].j] {
-				bwd[i] = true
-				break
+			e := tab.edges[ei]
+			for _, p := range pre[i] {
+				words := make([]string, len(p.words)+1)
+				copy(words, p.words)
+				words[len(p.words)] = e.word
+				pre[e.j] = addPath(pre[e.j], pathItem{words: words, score: p.score + e.logp}, k)
 			}
 		}
 	}
-	return fwd, bwd
+	return pre
+}
+
+// bestSuffixes is the backward counterpart of bestPrefixes.
+func (s *Segmenter) bestSuffixes(tab edgeTable, n, k int) [][]pathItem {
+	suf := make([][]pathItem, n+1)
+	suf[n] = []pathItem{{score: 0}}
+	for i := n - 1; i >= 0; i-- {
+		for ei := tab.starts[i]; ei < tab.starts[i+1]; ei++ {
+			e := tab.edges[ei]
+			for _, q := range suf[e.j] {
+				words := make([]string, len(q.words)+1)
+				words[0] = e.word
+				copy(words[1:], q.words)
+				suf[i] = addPath(suf[i], pathItem{words: words, score: e.logp + q.score}, k)
+			}
+		}
+	}
+	return suf
+}
+
+// addPath inserts p into the best-k list, keeping it sorted best first.
+func addPath(list []pathItem, p pathItem, k int) []pathItem {
+	list = append(list, p)
+	sort.SliceStable(list, func(i, j int) bool { return list[i].score > list[j].score })
+	if len(list) > k {
+		list = list[:k]
+	}
+	return list
 }
 
 // partialPaths enumerates up to k segmentations carrying exactly one unknown
 // run; the text around the run is covered by dictionary words.
-func (s *Segmenter) partialPaths(tab edgeTable, ar *wordArena, t string, k int) []Candidate {
+func (s *Segmenter) partialPaths(tab edgeTable, t string, k int) []Candidate {
 	n := len(t)
 	if n < 2 || k <= 0 {
 		return nil
 	}
-	fwd, bwd := s.coverable(tab)
-
-	// pre[a] enumerates the covers of t[:a], suf[b] those of t[b:]. Only
-	// positions that can actually be covered are searched, which keeps the
-	// search linear for glued tokens that are mostly unknown.
-	pre := make([][]pathItem, n+1)
-	suf := make([][]pathItem, n+1)
-	pre[0] = []pathItem{{score: 0}}
-	suf[n] = []pathItem{{score: 0}}
-	for i := 1; i <= n; i++ {
-		if fwd[i] {
-			pre[i] = s.enumDict(tab, ar, 0, i, 2, s.Opt.MaxNodes)
-		}
-		if bwd[i] {
-			suf[i] = s.enumDict(tab, ar, i, n, 2, s.Opt.MaxNodes)
-		}
-	}
+	pre := s.bestPrefixes(tab, n, 2)
+	suf := s.bestSuffixes(tab, n, 2)
 
 	var out []Candidate
 	for a := 0; a <= n; a++ {
@@ -402,6 +521,9 @@ func (s *Segmenter) partialPaths(tab edgeTable, ar *wordArena, t string, k int) 
 					words = append(words, p.words...)
 					words = append(words, t[a:b])
 					words = append(words, q.words...)
+					if len(words) > s.Opt.MaxWords {
+						continue
+					}
 					out = append(out, Candidate{Words: words, Split: len(words) > 1})
 				}
 			}
@@ -411,7 +533,7 @@ func (s *Segmenter) partialPaths(tab edgeTable, ar *wordArena, t string, k int) 
 	for i := range out {
 		out[i].Score = s.score(out[i].Words)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	sort.SliceStable(out, func(i, j int) bool { return Compare(out[i], out[j]) < 0 })
 	if len(out) > k {
 		out = out[:k]
 	}
@@ -517,20 +639,24 @@ func (s *Segmenter) Combine(sets [][]Candidate, k int) []Candidate {
 
 	idx := make([]int, len(sets))
 	score := 0.0
-	split := false
 	for _, set := range sets {
 		score += set[0].Score
-		split = split || set[0].Split
 	}
 
-	pool := 2000
+	pool := 4096
+	if k < 256 {
+		pool = k * len(sets) * 16
+	}
+	if pool < 512 {
+		pool = 512
+	}
 	if size := productSize(sets); size < pool {
 		pool = size
 	}
 
 	h := &comboHeap{}
 	seen := map[string]bool{keyOf(idx): true}
-	h.push(comboItem{idx: idx, score: score, split: split})
+	h.push(comboItem{idx: idx, score: score})
 
 	running := make([]Candidate, 0, min(pool, 256))
 	for len(h.items) > 0 && len(running) < pool {
@@ -539,7 +665,19 @@ func (s *Segmenter) Combine(sets [][]Candidate, k int) []Candidate {
 		for i, ci := range it.idx {
 			words = append(words, sets[i][ci].Words...)
 		}
-		running = append(running, Candidate{Words: words, Split: it.split})
+		if len(words) <= s.Opt.MaxWords {
+			// Recompute Split from the selected candidates. Inheriting it
+			// from the parent combination marks a whole glued token as
+			// split whenever any earlier combination was split.
+			split := false
+			for i, ci := range it.idx {
+				if sets[i][ci].Split {
+					split = true
+					break
+				}
+			}
+			running = append(running, Candidate{Words: words, Split: split})
+		}
 		for i := range sets {
 			if it.idx[i]+1 >= len(sets[i]) {
 				continue
@@ -554,7 +692,6 @@ func (s *Segmenter) Combine(sets [][]Candidate, k int) []Candidate {
 			h.push(comboItem{
 				idx:   next,
 				score: it.score - sets[i][it.idx[i]].Score + sets[i][next[i]].Score,
-				split: it.split || sets[i][next[i]].Split,
 			})
 		}
 	}
@@ -562,7 +699,7 @@ func (s *Segmenter) Combine(sets [][]Candidate, k int) []Candidate {
 	for i := range running {
 		running[i].Score = s.score(running[i].Words)
 	}
-	sort.SliceStable(running, func(i, j int) bool { return running[i].Score > running[j].Score })
+	sort.SliceStable(running, func(i, j int) bool { return Compare(running[i], running[j]) < 0 })
 
 	// Two different index paths always produce different Words: the number
 	// of words each token contributes is fixed by the path, so equal Words
@@ -605,7 +742,6 @@ func keyOf(idx []int) string {
 type comboItem struct {
 	idx   []int
 	score float64
-	split bool
 }
 
 // comboHeap is a hand-rolled binary max-heap (root = highest score). It

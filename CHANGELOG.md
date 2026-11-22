@@ -12,6 +12,12 @@ is not tracked here.
 
 ### Added
 
+- `run` quality controls: `-max_words`, `-word_penalty`, `-short_word_penalty`,
+  `-min_gain`, `-window`, `-bigram_backoff`, `-rank`, `-no_asis` and `-score`.
+  `-score` appends `quality` (candidate score) and `confidence` (softmax over
+  the rows of one input line) columns to the TSV.
+- `segment.Compare` gives candidates deterministic readability tie-breakers:
+  score, fewer words, longer shortest word, then lexicographic order.
 - `TestGoldenListFull`: a golden-hash regression gate that runs the whole
   pipeline over the canonical input list `old/list.full` (80 047 lines →
   764 501 rows) with default flags and asserts the SHA-256 of the output
@@ -47,6 +53,20 @@ is not tracked here.
 
 ### Fixed
 
+- `Bigrams.Cond` charged a large unseen-pair penalty whenever the left word was
+  frequent: an absent pair was interpolated with `K=5` instead of falling back
+  to the unigram probability of the right word. `CondLegacy` keeps the old rule
+  behind `-bigram_backoff legacy` for comparison.
+- `Segmenter.Combine` inherited the `split` flag from its heap parent, so a
+  whole glued token was labelled `split` whenever an earlier combination in
+  the search was split. The flag is now recomputed from the chosen candidates.
+- The `run` writer stopped draining `results` after a write error, leaving
+  workers blocked on a full channel and deadlocking the pipeline; it now keeps
+  consuming and discarding results after the first write failure.
+- `atoiField` relied on signed overflow to detect oversized counts; it now
+  checks the bound before multiplying.
+- `TestGoldenListFull` re-baselined to `4725dd24…` (80 047 lines → 186 627 rows)
+  for the intended output changes above.
 - `ParseWordCount` swapped fields on `word<TAB>count` lines whose word is
   numeric: the old "first integer field is the count" rule read
   `1<TAB>70533` as `count=1 word=70533`, and summed 6509 numeric-token
@@ -57,12 +77,25 @@ is not tracked here.
 
 ### Changed
 
+- Scoring now subtracts `-word_penalty` per word boundary and
+  `-short_word_penalty` per missing letter of a non-numeric word shorter than
+  3; unseen bigrams fall back to the unigram probability. `-max_variants`
+  defaults to 8 (was 20) and `-max_words` caps candidates at 6 words.
+- `Segmenter.Segment` over-generates four times the candidate count because the
+  unigram pruning bound is no longer admissible after bigram re-scoring.
+  `partialPaths` now computes best prefix/suffix covers in one pass instead of
+  calling `enumDict` per prefix; `Combine`'s best-first pool is bounded by
+  `k * len(sets) * 16` (minimum 512).
 - Benchmarks (`BenchmarkProcessLine`, `BenchmarkSegmentOnly`) now sample
   `old/list.full` instead of `old/list.40k`, following the project decision
   to treat `list.full` as the canonical input list.
 
 ### Documentation
 
+- `README.md` documents the new `run` flags, `-score` columns, penalty-based
+  scoring, guardrails and the new golden hash; the layout now lists
+  `line.go` / `pipeline.go`. `AGENTS.md` records repo-specific traps and the
+  exact verification commands.
 - `README.md` gains a shipped-models table, a supported-scripts table and an
   "Adding another language" walkthrough (fetch, romanize, `-scale_total`).
 - `SOURCES.md` catalogues downloadable word-frequency lists and corpora

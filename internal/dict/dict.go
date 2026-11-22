@@ -236,32 +236,55 @@ func LoadBigrams(dir string, minCount int, maxLen int) (*Bigrams, error) {
 }
 
 // Cond returns log P(w2|w1) smoothed towards the unigram distribution.
-// uni must return the unigram probability of a known word. When nothing is
-// known about the pair it falls back to that unigram probability.
+// uni must return the unigram probability of a known word. A pair that is
+// absent from the model falls back to that unigram probability: the model has
+// nothing to say about the pair, so it must not charge a large unseen-pair
+// penalty just because w1 is frequent.
 func (b *Bigrams) Cond(w1, w2 string, uni func(string) float64) float64 {
-	if b == nil {
+	c, left, ok := b.lookup(w1, w2)
+	if !ok || c == 0 {
 		return math.Log(uni(w2))
 	}
 	// Interpolated: (c(w1,w2) + K*p(w2)) / (c(w1) + K)
 	const k = 5.0
-	var c, left int64
-	if g, ok := b.index[w1]; ok {
-		lo, hi := int(b.start[g]), int(b.end[g])
-		left = b.total[g]
-		// Binary search the right word inside the group.
-		for lo < hi {
-			m := int(uint(lo+hi) >> 1)
-			if b.pairs[m].w2 < w2 {
-				lo = m + 1
-			} else {
-				hi = m
-			}
-		}
-		if lo < int(b.end[g]) && b.pairs[lo].w2 == w2 {
-			c = b.pairs[lo].c
+	return math.Log((float64(c) + k*uni(w2)) / (float64(left) + k))
+}
+
+// CondLegacy is the pre-backoff-fix conditional probability, kept behind
+// -bigram_backoff legacy for comparison. It interpolates every pair, including
+// unseen ones, towards the unigram distribution with a fixed K.
+func (b *Bigrams) CondLegacy(w1, w2 string, uni func(string) float64) float64 {
+	c, left, _ := b.lookup(w1, w2)
+	const k = 5.0
+	return math.Log((float64(c) + k*uni(w2)) / (float64(left) + k))
+}
+
+// lookup finds the count of the pair and the total count of its left word.
+// ok reports whether the left word has a group at all; c is zero for a
+// missing pair inside an existing group.
+func (b *Bigrams) lookup(w1, w2 string) (c, left int64, ok bool) {
+	if b == nil {
+		return 0, 0, false
+	}
+	g, ok := b.index[w1]
+	if !ok {
+		return 0, 0, false
+	}
+	lo, hi := int(b.start[g]), int(b.end[g])
+	left = b.total[g]
+	// Binary search the right word inside the group.
+	for lo < hi {
+		m := int(uint(lo+hi) >> 1)
+		if b.pairs[m].w2 < w2 {
+			lo = m + 1
+		} else {
+			hi = m
 		}
 	}
-	return math.Log((float64(c) + k*uni(w2)) / (float64(left) + k))
+	if lo < int(b.end[g]) && b.pairs[lo].w2 == w2 {
+		c = b.pairs[lo].c
+	}
+	return c, left, true
 }
 
 // Len is the number of distinct bigrams.
@@ -327,17 +350,19 @@ func atoiField(s string) (int, bool) {
 	if s == "" {
 		return 0, false
 	}
+	const maxInt = int(^uint(0) >> 1)
 	n := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c < '0' || c > '9' {
 			return 0, false
 		}
-		n = n*10 + int(c-'0')
-		if n < 0 {
+		d := int(c - '0')
+		if n > (maxInt-d)/10 {
 			// Overflowed an int; treat as not-a-count.
 			return 0, false
 		}
+		n = n*10 + d
 	}
 	return n, true
 }

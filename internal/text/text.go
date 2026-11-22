@@ -80,10 +80,36 @@ func IsSplittable(s string) bool {
 	if s == "" {
 		return false
 	}
-	for _, r := range s {
-		if !IsSplitRune(r) {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
 			return false
 		}
 	}
 	return true
+}
+
+// IsDigits reports whether s is a non-empty run of ASCII digits.
+func IsDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Glue drops everything that is not a letter, digit or combining mark,
+// producing the glued form of a separated spell: "ku-ra" -> "kura".
+func Glue(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if IsWordRune(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
