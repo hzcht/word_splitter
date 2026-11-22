@@ -20,8 +20,8 @@ is not tracked here.
   score, fewer words, longer shortest word, then lexicographic order.
 - `TestGoldenListFull`: a golden-hash regression gate that runs the whole
   pipeline over the canonical input list `old/list.full` (80 047 lines →
-  764 501 rows) with default flags and asserts the SHA-256 of the output
-  (`952e99fe…`). It skips when `old/list.full` or `dicts/` are missing.
+  186 627 rows at `-max_variants 20`) and asserts the SHA-256 of the output
+  (`4725dd24…`). It skips when `old/list.full` or `dicts/` are missing.
 - Shipped dictionaries extended from the unused legacy sources:
   `dicts/en.txt` now also merges `old/corpus.txt` (117 280 → 559 936 words)
   and `dicts/en.bigrams` merges `old/1.txt` + `old/w3.txt`
